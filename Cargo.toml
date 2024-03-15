@@ -1,0 +1,13 @@
+[package]
+name = "BrInfo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+syn = { version = "2.0.48", features = [ "parsing", "full", "visit", "extra-traits", "visit-mut" ] }
+quote = "1.0.28"
+proc-macro2 = { version = "1.0.76", features = ["span-locations"] }
+
+[toolchain]
+channel = "nightly"
+components = ["rust-src", "rustc-dev", "llvm-tools"]
