@@ -113,6 +113,7 @@ impl MirCheckerCallbacks {
                         // println!("{:#?}", blocks.reverse_postorder()[block]);
                         // println!("{:#?}", data);
                         let block_name = BasicBlock::from_usize(block);
+                        println!("{:#?}", blocks[block_name]);
                         // println!("{:#?}", block);
                         // println!("{:#?}", pre_blocks[block_name]);
                         let statements = data.statements.clone();
@@ -144,7 +145,7 @@ impl MirCheckerCallbacks {
                     ret.push(a_fn_block);
                 }
                 _ => {
-                    println!("mir other kind: {:?}", tcx.def_kind(item));
+                    // println!("mir other kind: {:?}", tcx.def_kind(item));
                 }
             }
         }
