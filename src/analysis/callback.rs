@@ -1,5 +1,4 @@
 use crate::analysis::option::AnalysisOption;
-use core::mem::size_of;
 use log::info;
 use rustc_driver::Compilation;
 use rustc_hir::def;
@@ -8,6 +7,7 @@ use rustc_interface::Queries;
 use rustc_middle::mir::BasicBlock;
 use rustc_middle::mir::Statement;
 use rustc_middle::mir::Terminator;
+use rustc_middle::mir::TerminatorKind;
 use rustc_middle::ty::TyCtxt;
 use std::collections::HashMap;
 
@@ -61,6 +61,7 @@ struct MyBlock<'a> {
 struct FnBlocks<'a> {
     fn_name: String,
     blocks: Vec<MyBlock<'a>>,
+    cond_chains: Vec<Vec<(String, String)>>,
 }
 
 impl FnBlocks<'_> {
@@ -78,6 +79,74 @@ impl FnBlocks<'_> {
             println!("preds {:?}", block.pre_blocks);
             println!("succs {:?}", block.suc_blocks);
             println!();
+        }
+    }
+
+    fn cond_chain_cout(&mut self) {
+        let mut init: Vec<(String, String)> = Vec::new();
+        init.push(("break".to_string(), 0.to_string()));
+        self.dfs(0, init);
+        let mut i = 0;
+        for cond_chain in self.cond_chains.clone() {
+            println!("CondChain {}", i);
+            let mut chain: String = "".to_string();
+            let mut cfgflow: String = "".to_string();
+            for (s1, s2) in cond_chain {
+                if s1 != "break" {
+                    if chain.len() == 0 {
+                        chain = s1;
+                    } else {
+                        chain = chain + "->" + s1.as_str();
+                    }
+                }
+                if cfgflow.len() == 0 {
+                    cfgflow = s2;
+                } else {
+                    cfgflow = cfgflow + " " + s2.as_str();
+                }
+            }
+            println!("{}", chain);
+            println!("{}", cfgflow);
+            println!();
+            i = i + 1;
+        }
+    }
+
+    fn dfs(&mut self, i: usize, cond_chain: Vec<(String, String)>) {
+        if self.blocks[i].suc_blocks.len() == 0 {
+            self.cond_chains.push(cond_chain);
+        } else if let Terminator {
+            kind: TerminatorKind::SwitchInt { targets, .. },
+            ..
+        } = self.blocks[i].terminator.clone()
+        {
+            let mut string_kind = format!("{:?}", &self.blocks[i].terminator.kind);
+            let mut start_index = string_kind.find('(').unwrap();
+            let end_index = string_kind.find(')').unwrap();
+            string_kind = string_kind[start_index + 1..end_index].to_string();
+            start_index = string_kind.find('_').unwrap();
+            let var = string_kind[start_index..].to_string();
+            for (value, target) in targets.iter() {
+                let mut new_cond_chain = cond_chain.clone();
+                new_cond_chain.push((
+                    format!("{} = {}", var, value),
+                    usize::from(target).to_string(),
+                ));
+                self.dfs(usize::from(target), new_cond_chain);
+            }
+            let mut new_cond_chain = cond_chain.clone();
+            new_cond_chain.push((
+                format!("{} = otherwise", var),
+                usize::from(targets.otherwise()).to_string(),
+            ));
+            self.dfs(usize::from(targets.otherwise()), new_cond_chain);
+        } else {
+            let mut new_cond_chain = cond_chain.clone();
+            new_cond_chain.push((
+                "break".to_string(),
+                usize::from(self.blocks[i].suc_blocks[0]).to_string(),
+            ));
+            self.dfs(usize::from(self.blocks[i].suc_blocks[0]), new_cond_chain);
         }
     }
 }
@@ -98,6 +167,7 @@ impl MirCheckerCallbacks {
                     let fn_name = format!("{:?}", item.to_def_id());
                     let mut fn_blocks: Vec<MyBlock> = vec![];
                     let mut mir = tcx.optimized_mir(item);
+                    println!("{:#?}", mir);
                     let mut mir2 = mir.clone();
                     let blocks = &mir.basic_blocks;
                     // println!("{:#?}", blocks.reverse_postorder());
@@ -113,7 +183,7 @@ impl MirCheckerCallbacks {
                         // println!("{:#?}", blocks.reverse_postorder()[block]);
                         // println!("{:#?}", data);
                         let block_name = BasicBlock::from_usize(block);
-                        println!("{:#?}", blocks[block_name]);
+                        // println!("{:#?}", blocks[block_name]);
                         // println!("{:#?}", block);
                         // println!("{:#?}", pre_blocks[block_name]);
                         let statements = data.statements.clone();
@@ -141,6 +211,7 @@ impl MirCheckerCallbacks {
                     let a_fn_block = FnBlocks {
                         fn_name: fn_name,
                         blocks: fn_blocks.clone(),
+                        cond_chains: Vec::new(),
                     };
                     ret.push(a_fn_block);
                 }
@@ -149,8 +220,9 @@ impl MirCheckerCallbacks {
                 }
             }
         }
-        for block in ret {
+        for mut block in ret {
             block.my_cout();
+            block.cond_chain_cout();
         }
     }
 }
