@@ -1,15 +1,60 @@
 use crate::analysis::option::AnalysisOption;
 use log::info;
+use petgraph::dot::Config;
+use petgraph::dot::Dot;
+use petgraph::graph::DiGraph;
+use petgraph::prelude::*;
+use regex::Regex;
 use rustc_driver::Compilation;
 use rustc_hir::def;
 use rustc_interface::interface;
 use rustc_interface::Queries;
 use rustc_middle::mir::BasicBlock;
 use rustc_middle::mir::Statement;
+use rustc_middle::mir::StatementKind;
 use rustc_middle::mir::Terminator;
 use rustc_middle::mir::TerminatorKind;
 use rustc_middle::ty::TyCtxt;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Write;
+
+fn get_span_string(
+    file_path: String,
+    line_number: i32,
+    start_column: i32,
+    end_column: i32,
+) -> String {
+    // 读取指定文件
+    let file = File::open(file_path).unwrap();
+    let reader = BufReader::new(file);
+
+    // 遍历文件每一行
+    let specific_line = reader
+        .lines()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            if i + 1 == line_number as usize {
+                line.ok()
+            } else {
+                None
+            }
+        })
+        .next()
+        .unwrap_or_else(|| "".to_string());
+
+    // 从特定行中提取列范围的文本
+    let snippet = specific_line
+        .chars()
+        .skip((start_column - 1) as usize) // 跳过到起始列的字符
+        .take((end_column - start_column) as usize) // 提取指定长度的字符
+        .collect::<String>();
+
+    println!("Extracted snippet: '{}'", snippet);
+    snippet
+}
 
 pub struct MirCheckerCallbacks {
     pub analysis_options: AnalysisOption,
@@ -78,6 +123,28 @@ impl FnBlocks<'_> {
             println!("terminator {:?}", block.terminator);
             println!("preds {:?}", block.pre_blocks);
             println!("succs {:?}", block.suc_blocks);
+            let span = format!("{:?}", block.terminator.source_info.span);
+            println!("{}", span);
+            let re = Regex::new(r"^(.*?):(\d+):(\d+): (\d+):(\d+)").unwrap();
+            if let Some(caps) = re.captures(&span) {
+                let file_path = caps.get(1).map_or("", |m| m.as_str());
+                let start_line = caps.get(2).map_or("", |m| m.as_str());
+                let start_column = caps.get(3).map_or("", |m| m.as_str());
+                let end_line = caps.get(4).map_or("", |m| m.as_str());
+                let end_column = caps.get(5).map_or("", |m| m.as_str());
+
+                // println!("File path: {}", file_path);
+                // println!("Start: line {}, column {}", start_line, start_column);
+                // println!("End: line {}, column {}", end_line, end_column);
+                get_span_string(
+                    file_path.to_string(),
+                    start_line.parse::<i32>().unwrap(),
+                    start_column.parse::<i32>().unwrap(),
+                    end_column.parse::<i32>().unwrap(),
+                );
+            } else {
+                println!("No match found");
+            }
             println!();
         }
     }
@@ -87,7 +154,9 @@ impl FnBlocks<'_> {
         init.push(("break".to_string(), 0.to_string()));
         self.dfs(0, init);
         let mut i = 0;
+        let mut file_string: String = String::new();
         for cond_chain in self.cond_chains.clone() {
+            file_string = file_string + &format!("CondChain {}\n", i);
             println!("CondChain {}", i);
             let mut chain: String = "".to_string();
             let mut cfgflow: String = "".to_string();
@@ -96,7 +165,7 @@ impl FnBlocks<'_> {
                     if chain.len() == 0 {
                         chain = s1;
                     } else {
-                        chain = chain + "->" + s1.as_str();
+                        chain = chain + " -> " + s1.as_str();
                     }
                 }
                 if cfgflow.len() == 0 {
@@ -105,16 +174,20 @@ impl FnBlocks<'_> {
                     cfgflow = cfgflow + " " + s2.as_str();
                 }
             }
+            file_string = file_string + &format!("{}\n", chain);
+            file_string = file_string + &format!("{}\n", cfgflow);
             println!("{}", chain);
             println!("{}", cfgflow);
             println!();
             i = i + 1;
         }
+        let mut file = File::create(format!("{}_condchain.txt", self.fn_name)).unwrap();
+        file.write_all(file_string.as_bytes()).unwrap();
     }
 
     fn dfs(&mut self, i: usize, cond_chain: Vec<(String, String)>) {
         if self.blocks[i].suc_blocks.len() == 0 {
-            self.cond_chains.push(cond_chain);
+            self.cond_chains.push(cond_chain.clone());
         } else if let Terminator {
             kind: TerminatorKind::SwitchInt { targets, .. },
             ..
@@ -126,28 +199,167 @@ impl FnBlocks<'_> {
             string_kind = string_kind[start_index + 1..end_index].to_string();
             start_index = string_kind.find('_').unwrap();
             let var = string_kind[start_index..].to_string();
+            let terminator = self.blocks[i].terminator.clone();
             for (value, target) in targets.iter() {
-                let mut new_cond_chain = cond_chain.clone();
-                new_cond_chain.push((
-                    format!("{} = {}", var, value),
-                    usize::from(target).to_string(),
-                ));
-                self.dfs(usize::from(target), new_cond_chain);
+                if !cond_chain
+                    .iter()
+                    .any(|pair| pair.1 == usize::from(target).to_string())
+                {
+                    let mut new_cond_chain = cond_chain.clone();
+                    let span = format!("{:?}", terminator.source_info.span);
+                    // println!("{}", span);
+                    let re = Regex::new(r"^(.*?):(\d+):(\d+): (\d+):(\d+)").unwrap();
+                    if let Some(caps) = re.captures(&span) {
+                        let file_path = caps.get(1).map_or("", |m| m.as_str());
+                        let start_line = caps.get(2).map_or("", |m| m.as_str());
+                        let start_column = caps.get(3).map_or("", |m| m.as_str());
+                        let end_line = caps.get(4).map_or("", |m| m.as_str());
+                        let end_column = caps.get(5).map_or("", |m| m.as_str());
+
+                        // println!("File path: {}", file_path);
+                        // println!("Start: line {}, column {}", start_line, start_column);
+                        // println!("End: line {}, column {}", end_line, end_column);
+                        let cond = get_span_string(
+                            file_path.to_string(),
+                            start_line.parse::<i32>().unwrap(),
+                            start_column.parse::<i32>().unwrap(),
+                            end_column.parse::<i32>().unwrap(),
+                        );
+                        new_cond_chain.push((
+                            format!("{} == {}", cond, value),
+                            usize::from(target).to_string(),
+                        ));
+                        self.dfs(usize::from(target), new_cond_chain);
+                    }
+                } else {
+                    let mut new_cond_chain = cond_chain.clone();
+                    let span = format!("{:?}", terminator.source_info.span);
+                    // println!("{}", span);
+                    let re = Regex::new(r"^(.*?):(\d+):(\d+): (\d+):(\d+)").unwrap();
+                    if let Some(caps) = re.captures(&span) {
+                        let file_path = caps.get(1).map_or("", |m| m.as_str());
+                        let start_line = caps.get(2).map_or("", |m| m.as_str());
+                        let start_column = caps.get(3).map_or("", |m| m.as_str());
+                        let end_line = caps.get(4).map_or("", |m| m.as_str());
+                        let end_column = caps.get(5).map_or("", |m| m.as_str());
+
+                        // println!("File path: {}", file_path);
+                        // println!("Start: line {}, column {}", start_line, start_column);
+                        // println!("End: line {}, column {}", end_line, end_column);
+                        let cond = get_span_string(
+                            file_path.to_string(),
+                            start_line.parse::<i32>().unwrap(),
+                            start_column.parse::<i32>().unwrap(),
+                            end_column.parse::<i32>().unwrap(),
+                        );
+                        new_cond_chain.push((
+                            format!("{} == {}", cond, value),
+                            usize::from(target).to_string(),
+                        ));
+                        self.cond_chains.push(new_cond_chain.clone());
+                    }
+                }
             }
-            let mut new_cond_chain = cond_chain.clone();
-            new_cond_chain.push((
-                format!("{} = otherwise", var),
-                usize::from(targets.otherwise()).to_string(),
-            ));
-            self.dfs(usize::from(targets.otherwise()), new_cond_chain);
+            if !cond_chain
+                .iter()
+                .any(|pair| pair.1 == usize::from(targets.otherwise()).to_string())
+            {
+                let mut new_cond_chain = cond_chain.clone();
+                let span = format!("{:?}", terminator.source_info.span);
+                // println!("{}", span);
+                let re = Regex::new(r"^(.*?):(\d+):(\d+): (\d+):(\d+)").unwrap();
+                if let Some(caps) = re.captures(&span) {
+                    let file_path = caps.get(1).map_or("", |m| m.as_str());
+                    let start_line = caps.get(2).map_or("", |m| m.as_str());
+                    let start_column = caps.get(3).map_or("", |m| m.as_str());
+                    let end_line = caps.get(4).map_or("", |m| m.as_str());
+                    let end_column = caps.get(5).map_or("", |m| m.as_str());
+
+                    // println!("File path: {}", file_path);
+                    // println!("Start: line {}, column {}", start_line, start_column);
+                    // println!("End: line {}, column {}", end_line, end_column);
+                    let cond = get_span_string(
+                        file_path.to_string(),
+                        start_line.parse::<i32>().unwrap(),
+                        start_column.parse::<i32>().unwrap(),
+                        end_column.parse::<i32>().unwrap(),
+                    );
+                    new_cond_chain.push((
+                        format!("{} == 1", cond),
+                        usize::from(targets.otherwise()).to_string(),
+                    ));
+                    self.dfs(usize::from(targets.otherwise()), new_cond_chain);
+                }
+            } else {
+                let mut new_cond_chain = cond_chain.clone();
+                let span = format!("{:?}", terminator.source_info.span);
+                // println!("{}", span);
+                let re = Regex::new(r"^(.*?):(\d+):(\d+): (\d+):(\d+)").unwrap();
+                if let Some(caps) = re.captures(&span) {
+                    let file_path = caps.get(1).map_or("", |m| m.as_str());
+                    let start_line = caps.get(2).map_or("", |m| m.as_str());
+                    let start_column = caps.get(3).map_or("", |m| m.as_str());
+                    let end_line = caps.get(4).map_or("", |m| m.as_str());
+                    let end_column = caps.get(5).map_or("", |m| m.as_str());
+
+                    // println!("File path: {}", file_path);
+                    // println!("Start: line {}, column {}", start_line, start_column);
+                    // println!("End: line {}, column {}", end_line, end_column);
+                    let cond = get_span_string(
+                        file_path.to_string(),
+                        start_line.parse::<i32>().unwrap(),
+                        start_column.parse::<i32>().unwrap(),
+                        end_column.parse::<i32>().unwrap(),
+                    );
+                    new_cond_chain.push((
+                        format!("{} == 1", cond),
+                        usize::from(targets.otherwise()).to_string(),
+                    ));
+                    self.cond_chains.push(new_cond_chain.clone());
+                }
+            }
         } else {
+            // if !cond_chain
+            //     .iter()
+            //     .any(|pair| pair.1 == usize::from(self.blocks[i].suc_blocks[0]).to_string())
+            // {
             let mut new_cond_chain = cond_chain.clone();
             new_cond_chain.push((
                 "break".to_string(),
                 usize::from(self.blocks[i].suc_blocks[0]).to_string(),
             ));
             self.dfs(usize::from(self.blocks[i].suc_blocks[0]), new_cond_chain);
+            // } else {
+            //     self.cond_chains.push(cond_chain.clone());
+            // }
         }
+    }
+
+    fn dump_cfg_to_dot(&self) {
+        let mut graph = DiGraph::<String, String>::new();
+
+        for block in self.blocks.clone() {
+            let label = format!(
+                "{:?}\n{:?}\n{:?}",
+                block.block_name, block.statements, block.terminator
+            );
+            graph.add_node(label);
+        }
+
+        for block in self.blocks.clone() {
+            for succ in block.suc_blocks {
+                graph.add_edge(
+                    NodeIndex::new(block.block_name.index()),
+                    NodeIndex::new(succ.index()),
+                    "".to_string(),
+                );
+            }
+        }
+
+        // 用Graphviz Dot格式输出并写入文件
+        let dot = Dot::with_config(&graph, &[Config::EdgeNoLabel]);
+        let mut file = File::create(format!("{}_cfg.dot", self.fn_name)).unwrap();
+        writeln!(file, "{:?}", dot).unwrap();
     }
 }
 
@@ -167,7 +379,7 @@ impl MirCheckerCallbacks {
                     let fn_name = format!("{:?}", item.to_def_id());
                     let mut fn_blocks: Vec<MyBlock> = vec![];
                     let mut mir = tcx.optimized_mir(item);
-                    println!("{:#?}", mir);
+                    // println!("{:#?}", mir);
                     let mut mir2 = mir.clone();
                     let blocks = &mir.basic_blocks;
                     // println!("{:#?}", blocks.reverse_postorder());
@@ -209,11 +421,15 @@ impl MirCheckerCallbacks {
                     }
                     // println!("{:#?}", fn_blocks);
                     let a_fn_block = FnBlocks {
-                        fn_name: fn_name,
+                        fn_name: fn_name.clone(),
                         blocks: fn_blocks.clone(),
                         cond_chains: Vec::new(),
                     };
                     ret.push(a_fn_block);
+
+                    // println!("{}", fn_name.clone());
+                    // println!("{:#?}", mir);
+                    println!();
                 }
                 _ => {
                     // println!("mir other kind: {:?}", tcx.def_kind(item));
@@ -223,6 +439,7 @@ impl MirCheckerCallbacks {
         for mut block in ret {
             block.my_cout();
             block.cond_chain_cout();
+            // block.dump_cfg_to_dot();
         }
     }
 }
