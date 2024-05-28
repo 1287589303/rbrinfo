@@ -16,6 +16,7 @@ use rustc_middle::mir::Terminator;
 use rustc_middle::mir::TerminatorKind;
 use rustc_middle::ty::TyCtxt;
 use std::collections::HashMap;
+use std::fs;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -181,7 +182,10 @@ impl FnBlocks<'_> {
             println!();
             i = i + 1;
         }
-        let mut file = File::create(format!("{}_condchain.txt", self.fn_name)).unwrap();
+        let dir_path = "./branch-info";
+        let file_path = format!("{}/{}_condchain.txt", dir_path, self.fn_name);
+        fs::create_dir_all(dir_path).unwrap();
+        let mut file = File::create(file_path).unwrap();
         file.write_all(file_string.as_bytes()).unwrap();
     }
 
