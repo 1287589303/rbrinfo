@@ -28,6 +28,12 @@ fn get_span_string(
     start_column: i32,
     end_column: i32,
 ) -> String {
+    let mut a: i8 = 1;
+    let mut b: i32 = 3;
+    if a > 3 && b <= 6 {
+        a += 1;
+    }
+
     // 读取指定文件
     let file = File::open(file_path).unwrap();
     let reader = BufReader::new(file);
@@ -77,6 +83,21 @@ impl rustc_driver::Callbacks for MirCheckerCallbacks {
         self.source_name = format!("{:?}", config.input.source_name());
         config.crate_cfg.push("mir_checker".to_string());
         info!("Source file: {}", self.source_name);
+    }
+
+    fn after_crate_root_parsing<'tcx>(
+        &mut self,
+        compiler: &interface::Compiler,
+        queries: &'tcx Queries<'tcx>,
+    ) -> Compilation {
+        let krate = queries.parse().unwrap().borrow().clone();
+        let dir_path = "./hir";
+        let file_path = format!("{}/hir.txt", dir_path);
+        fs::create_dir_all(dir_path).unwrap();
+        let mut file = File::create(file_path).unwrap();
+        file.write_all(format!("{:#?}", krate).as_bytes()).unwrap();
+        // println!("{:#?}", krate);
+        Compilation::Continue
     }
 
     /// Called after analysis. Return value instructs the compiler whether to
@@ -148,6 +169,11 @@ impl FnBlocks<'_> {
             }
             println!();
         }
+        let dir_path = "./fn_blocks";
+        let file_path = format!("{}/{}_fn_block.txt", dir_path, self.fn_name);
+        fs::create_dir_all(dir_path).unwrap();
+        let mut file = File::create(file_path).unwrap();
+        file.write_all(format!("{:#?}", self).as_bytes()).unwrap();
     }
 
     fn cond_chain_cout(&mut self) {
@@ -434,6 +460,11 @@ impl MirCheckerCallbacks {
                     // println!("{}", fn_name.clone());
                     // println!("{:#?}", mir);
                     println!();
+                    let dir_path = "./mir";
+                    let file_path = format!("{}/{}_mir.txt", dir_path, fn_name);
+                    fs::create_dir_all(dir_path).unwrap();
+                    let mut file = File::create(file_path).unwrap();
+                    file.write_all(format!("{:#?}", mir).as_bytes()).unwrap();
                 }
                 _ => {
                     // println!("mir other kind: {:?}", tcx.def_kind(item));
